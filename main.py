@@ -91,16 +91,17 @@ def main(other_lr=5e-4, critic_lr = 0, seed=0, batch_size=64*8, batch_size_val=1
     )
 
     ''' model definition '''
-    teacher = create_model(
-        teacher_name,
-        pretrained=pretrained, 
-        num_classes=nb_classes,
-        drop_rate=drop,
-        drop_path_rate=drop_path,
-        drop_block_rate=None,
-    )
-    teacher = teacher.to(device)
-    teacher.eval()
+    teacher = None
+    # teacher = create_model(
+    #     teacher_name,
+    #     pretrained=pretrained, 
+    #     num_classes=nb_classes,
+    #     drop_rate=drop,
+    #     drop_path_rate=drop_path,
+    #     drop_block_rate=None,
+    # )
+    # teacher = teacher.to(device)
+    # teacher.eval()
 
     model = create_model(
         model_name,
@@ -150,23 +151,27 @@ def main(other_lr=5e-4, critic_lr = 0, seed=0, batch_size=64*8, batch_size_val=1
     else:
         mixup_fn = None
 
-    if mixup:
-        # smoothing is handled with mixup label transform
-        classifier_criterion = SoftTargetCrossEntropy()
-    elif smoothing:
-        classifier_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
-    else:
-        classifier_criterion = torch.nn.CrossEntropyLoss()
+    # if mixup:
+    #     # smoothing is handled with mixup label transform
+    #     classifier_criterion = SoftTargetCrossEntropy()
+    # elif smoothing:
+    #     classifier_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
+    # else:
+    #     classifier_criterion = torch.nn.CrossEntropyLoss()
+    classifier_criterion = torch.nn.CrossEntropyLoss()
 
-    if dist_type=='hard':
-        balance=0.5
-        dist_criterion = lambda x, y, z: F.cross_entropy(x, (torch.softmax(y, dim=-1) + torch.softmax(z, dim=-1)).argmax(-1))
-    elif dist_type=='soft':
-        balance=0.5
-        dist_criterion = utils.Dist_KLD(dist_temp)
-    else:
-        balance=0.0
-        dist_criterion = lambda x, y, z: torch.zeros(1).mean().to(x.device)
+    # if dist_type=='hard':
+    #     balance=0.5
+    #     dist_criterion = lambda x, y, z: F.cross_entropy(x, (torch.softmax(y, dim=-1) + torch.softmax(z, dim=-1)).argmax(-1))
+    # elif dist_type=='soft':
+    #     balance=0.5
+    #     dist_criterion = utils.Dist_KLD(dist_temp)
+    # else:
+    #     balance=0.0
+    #     dist_criterion = lambda x, y, z: torch.zeros(1).mean().to(x.device)
+
+    balance=0.0
+    dist_criterion = lambda x, y, z: torch.zeros(1).mean().to(x.device)
 
     other_lr = other_lr * batch_size * utils.get_world_size() / 512.0
     critic_lr = critic_lr * batch_size * utils.get_world_size() / 512.0
@@ -233,8 +238,15 @@ def main(other_lr=5e-4, critic_lr = 0, seed=0, batch_size=64*8, batch_size_val=1
 
         model_without_ddp.loc_tau = min(1 + ((loc_tau-1)*epoch/99), loc_tau)
 
+        # train_stats = train_one_epoch(
+        #     model, teacher, output_dir, data_loader_train,
+        #     optimizer, device, epoch, loss_scaler,
+        #     clip_grad, mixup_fn,
+        #     set_training_mode=training_mode,
+        #     balance=balance
+        # )
         train_stats = train_one_epoch(
-            model, teacher, output_dir, data_loader_train,
+            model, None, output_dir, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             clip_grad, mixup_fn,
             set_training_mode=training_mode,

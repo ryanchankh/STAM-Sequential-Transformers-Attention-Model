@@ -275,25 +275,28 @@ class STAMVisionTransformer(VisionTransformer):
 
             upto_now_loc = self.one_step_ahead_loc
 
-            ''' check for T>0 '''
-            upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
+            # ''' check for T>0 '''
+            # upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+            # feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
 
-            ''' Consistency '''
-            logits_dist = self.head_dist(feat_dist)
-            dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
+            # ''' Consistency '''
+            # logits_dist = self.head_dist(feat_dist)
+            # dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
+            dist_loss = 0.
 
             ''' CLS tasks '''
             logits = self.head(feat)
-            if dist_loss==torch.zeros(1).mean():
-                prob_fusion = (torch.softmax(logits, dim=-1) + torch.softmax(logits_dist, dim=-1))/2
-                class_loss = -torch.log(prob_fusion[range(B),targets[range(B)]]).mean()
-            else:
-                class_loss = self.classifier_criterion(logits, targets)
+            # if dist_loss==torch.zeros(1).mean():
+            #     prob_fusion = (torch.softmax(logits, dim=-1) + torch.softmax(logits_dist, dim=-1))/2
+            #     class_loss = -torch.log(prob_fusion[range(B),targets[range(B)]]).mean()
+            # else:
+            #     class_loss = self.classifier_criterion(logits, targets)
+            class_loss = self.classifier_criterion(logits, targets)
 
-            ''' Do actor-critic if tempT < T. We optimize only classifier for the last glimpse; next glimpse location is stored in the function '''
-            prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
-            actor_loss, critic_loss = self.actor_critic(upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher)
+            # ''' Do actor-critic if tempT < T. We optimize only classifier for the last glimpse; next glimpse location is stored in the function '''
+            # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
+            # actor_loss, critic_loss = self.actor_critic(upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher)
+            actor_loss, critic_loss = 0., 0.
 
             self.return_logits = logits.detach()
     
