@@ -276,13 +276,13 @@ class STAMVisionTransformer(VisionTransformer):
             upto_now_loc = self.one_step_ahead_loc
 
             # ''' check for T>0 '''
-            # upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            # feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
+            upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+            feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
 
             # ''' Consistency '''
             # logits_dist = self.head_dist(feat_dist)
             # dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
-            dist_loss = 0.
+            dist_loss = torch.tensor(0.).to(x.device)
 
             ''' CLS tasks '''
             logits = self.head(feat)
@@ -296,7 +296,7 @@ class STAMVisionTransformer(VisionTransformer):
             # ''' Do actor-critic if tempT < T. We optimize only classifier for the last glimpse; next glimpse location is stored in the function '''
             # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
             # actor_loss, critic_loss = self.actor_critic(upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher)
-            actor_loss, critic_loss = 0., 0.
+            actor_loss, critic_loss = torch.tensor(0.).to(x.device), torch.tensor(0.).to(x.device)
 
             self.return_logits = logits.detach()
     
