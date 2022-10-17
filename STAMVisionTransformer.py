@@ -276,8 +276,8 @@ class STAMVisionTransformer(VisionTransformer):
             upto_now_loc = self.one_step_ahead_loc
 
             # ''' check for T>0 '''
-            # upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            # feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
+            upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+            feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
 
             # ''' Consistency '''
             # logits_dist = self.head_dist(feat_dist)
