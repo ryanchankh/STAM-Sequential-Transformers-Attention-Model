@@ -24,7 +24,7 @@ def build_dataset(dataset, is_train, input_size, erasing_aug):
         re_prob = 0.25 if erasing_aug else 0
         transform = build_transform(is_train, True, 0, input_size, re_prob)
         partition = 'train' if is_train else 'val'
-        dataset = datasets.ImageFolder(DATAROOT/'imagenet'/partition, transform=transform)
+        dataset = datasets.ImageFolder(DATAROOT/partition, transform=transform)
         nb_classes = 1000
 
     elif dataset == 'fMoW':
