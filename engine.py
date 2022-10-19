@@ -67,8 +67,8 @@ def train_one_epoch(model: torch.nn.Module,
                 cls_loss, actor_loss, critic_loss, dist_loss = model(samples, targets_smooth, teacher_gt, teacher_dist)
                 outputs = model_without_ddp.return_logits
    
-            loss = cls_loss
-            # loss = (1-balance)*cls_loss + actor_loss + critic_loss + dist_loss*balance
+            # loss = cls_loss
+            loss = (1-balance)*cls_loss + actor_loss + critic_loss + dist_loss*balance
             cls_loss_value.append(cls_loss.item())
             dist_loss_value.append(dist_loss.item())
             if model_without_ddp.tempT < model_without_ddp.T:
