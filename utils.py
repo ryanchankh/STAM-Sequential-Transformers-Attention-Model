@@ -228,7 +228,7 @@ def init_distributed_mode(world_size):
     distributed = True
 
     torch.cuda.set_device(gpu)
-    dist_backend = 'nccl'
+    dist_backend = 'gloo'
     torch.distributed.init_process_group(backend=dist_backend, init_method='env://', world_size=world_size, rank=rank)
     torch.distributed.barrier()
     return gpu

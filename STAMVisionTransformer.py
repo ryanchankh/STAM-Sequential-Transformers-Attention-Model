@@ -316,8 +316,8 @@ class STAMVisionTransformer(VisionTransformer):
             # else:
             #     class_loss = self.classifier_criterion(logits, targets)
 
-            prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
-            logits_one_step = self.actor_critic(upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher)
+            # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
+            logits_one_step = self.predict_one_step_ahead(upto_now_loc, feat, feat_dist, x_pos, None)
             class_loss = self.classifier_criterion(logits_one_step, targets)
             
 
