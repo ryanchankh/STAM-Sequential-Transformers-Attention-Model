@@ -304,8 +304,8 @@ class STAMVisionTransformer(VisionTransformer):
             feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
 
             # ''' Consistency '''
-            # logits_dist = self.head_dist(feat_dist)
-            # dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
+            logits_dist = self.head_dist(feat_dist)
+            dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
             dist_loss = torch.tensor(0.).to(x.device)
 
             ''' CLS tasks '''
@@ -317,6 +317,7 @@ class STAMVisionTransformer(VisionTransformer):
             #     class_loss = self.classifier_criterion(logits, targets)
 
             # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
+            print('logits_one_step', logits_one_step)
             logits_one_step = self.predict_one_step_ahead(upto_now_loc, feat, feat_dist, x_pos, None)
             class_loss = self.classifier_criterion(logits_one_step, targets)
             
