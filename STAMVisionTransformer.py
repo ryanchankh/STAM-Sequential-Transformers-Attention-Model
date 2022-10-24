@@ -15,6 +15,7 @@ import copy
 
 from torch.distributions.categorical import Categorical
 import torch.distributed as dist
+from utils_IP import *
 
 
 class STAMVisionTransformer(VisionTransformer):
@@ -192,7 +193,7 @@ class STAMVisionTransformer(VisionTransformer):
         target = self.normalize_using_running_stats('popart', target, self.tempT-1)
         advantage = target.detach() - value_now
 
-        actor_loss = - (logpi * advantage.detach()).mean()
+        actor_loss = - (logpi * advantage.detach()).mean()  
         critic_loss = advantage.abs().mean()
 
         with torch.no_grad():
@@ -200,7 +201,21 @@ class STAMVisionTransformer(VisionTransformer):
             value_now = sigma * value_now + self.running_mean_popart[self.tempT-1]
         return actor_loss, critic_loss
     
-    def predict_one_step_ahead(self, upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher):
+    def predict_one_step_ahead(self, feat, feat_dist, x_pos_masked, x_pos, used_loc):
+        
+        # what's not been selected are candidates
+        candidate_loc = (1 - used_loc).abs()
+        
+        # evaluate what is the best next candidate
+        unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
+        future_loc, logpi = self.select_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
+        print('future_loc', future_loc.shape)
+        
+        # select next position
+        one_step_ahead_x_pos = x_pos_masked +  future_loc * x_pos
+        return one_step_ahead_x_pos
+    
+    def actor_critic(self, upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher):
         if self.tempT < self.T: 
             B = feat.size(0)
             '''actor tasks'''
@@ -218,54 +233,30 @@ class STAMVisionTransformer(VisionTransformer):
             ''' future V(S') '''
             one_step_ahead_loc = torch.cat([upto_now_loc, future_loc], 1)
             self.one_step_ahead_loc = one_step_ahead_loc
-            # with torch.no_grad():
-            one_step_ahead_x_pos = x_pos.gather(1, one_step_ahead_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            feat_one_step_ahead, feat_dist_one_step_ahead = self.extract_features_of_glimpses(one_step_ahead_x_pos)
-            logits_future = self.head(feat_one_step_ahead)
-            return logits_future
+            with torch.no_grad():
+                one_step_ahead_x_pos = x_pos.gather(1, one_step_ahead_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+                feat_one_step_ahead, feat_dist_one_step_ahead = self.extract_features_of_glimpses(one_step_ahead_x_pos)
+                logits_future = self.head(feat_one_step_ahead)
+                logits_dist_future = self.head_dist(feat_dist_one_step_ahead)
+                prob_fusion_future = (torch.softmax(logits_future, dim=-1) + torch.softmax(logits_dist_future, dim=-1))/2
 
-    # def actor_critic(self, upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher):
-    #     if self.tempT < self.T: 
-    #         B = feat.size(0)
-    #         '''actor tasks'''
-    #         all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(feat.device)
-    #         candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, upto_now_loc, 0.).bool()
-    #         candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - self.tempT)
-
-    #         unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
-    #         future_loc, logpi = self.select_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
-
-    #         '''critic tasks'''
-    #         ''' current V(S) '''
-    #         value_now = self.critic(torch.cat([feat, feat_dist],-1).detach())
-
-    #         ''' future V(S') '''
-    #         one_step_ahead_loc = torch.cat([upto_now_loc, future_loc], 1)
-    #         self.one_step_ahead_loc = one_step_ahead_loc
-    #         with torch.no_grad():
-    #             one_step_ahead_x_pos = x_pos.gather(1, one_step_ahead_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-    #             feat_one_step_ahead, feat_dist_one_step_ahead = self.extract_features_of_glimpses(one_step_ahead_x_pos)
-    #             logits_future = self.head(feat_one_step_ahead)
-    #             logits_dist_future = self.head_dist(feat_dist_one_step_ahead)
-    #             prob_fusion_future = (torch.softmax(logits_future, dim=-1) + torch.softmax(logits_dist_future, dim=-1))/2
-
-    #             if self.tempT>=(self.T-1): # (a) t=T-1 is a terminal state for loc_module. so value_future=0.
-    #                 value_future = torch.zeros_like(value_now)
-    #             else:
-    #                 value_future = self.critic(torch.cat([feat_one_step_ahead,feat_dist_one_step_ahead],-1).detach())
+                if self.tempT>=(self.T-1): # (a) t=T-1 is a terminal state for loc_module. so value_future=0.
+                    value_future = torch.zeros_like(value_now)
+                else:
+                    value_future = self.critic(torch.cat([feat_one_step_ahead,feat_dist_one_step_ahead],-1).detach())
 
                 
-    #         actor_loss, critic_loss = self.RL_loss(
-    #                                                prob_fusion_future,
-    #                                                value_now, value_future, logpi,
-    #                                                prob_fusion_teacher
-    #                                                )
+            actor_loss, critic_loss = self.RL_loss(
+                                                   prob_fusion_future,
+                                                   value_now, value_future, logpi,
+                                                   prob_fusion_teacher
+                                                   )
 
-    #     else:
-    #         actor_loss = 0
-    #         critic_loss = 0
+        else:
+            actor_loss = 0
+            critic_loss = 0
 
-    #     return actor_loss, critic_loss
+        return actor_loss, critic_loss
 
     def select_one_random_future_loc(self, upto_now_loc):
         B = upto_now_loc.size(0)
@@ -285,7 +276,7 @@ class STAMVisionTransformer(VisionTransformer):
 
 
     def forward(self, x, targets, teacher_gt, teacher_dist):
-
+    
         if self.training:
 
             B = x.size(0)
@@ -297,37 +288,63 @@ class STAMVisionTransformer(VisionTransformer):
             x_pos = self.patch_embed(x.flatten(1,3)) + pos.flatten(1,3) # (B, 7*7*2*2, 3, 16, 16) -> (B, 7*7*2*2, C)
             x_pos = x_pos.view(B, self.num_glimpse_per_dim**2, self.num_patch_per_dim_glimpse**2, self.embed_dim)
 
-            upto_now_loc = self.one_step_ahead_loc
+            # sample history
+            mask_indices_length = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(1,))
+            mask_indices = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), mask_indices_length, replacement=False) for _ in range(B)])
+            sampled_history = torch.gather(x_pos, 1, mask_indices[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))
+            feat, feat_dist = self.extract_features_of_glimpses(sampled_history)
+            upto_now_loc = mask_indices
 
+            # add one query
+            all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(feat.device)
+            candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, upto_now_loc, 0.).bool()
+            candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - self.tempT)
+            unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
+            future_loc, logpi = self.select_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
+            one_step_ahead_loc = torch.cat([upto_now_loc, future_loc], 1)
+            
+            # forward classifier
+            one_step_ahead_x_pos = x_pos.gather(1, one_step_ahead_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+            feat_one_step_ahead, feat_dist_one_step_ahead = self.extract_features_of_glimpses(one_step_ahead_x_pos)
+            logits_future = self.head(feat_one_step_ahead)
+            logits_dist_future = self.head_dist(feat_dist_one_step_ahead)
+            
+            # compute distillation losses
+            dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
+            
+            # compute entropy loss
+            if dist_loss==torch.zeros(1).mean():
+                prob_fusion = (torch.softmax(logits, dim=-1) + torch.softmax(logits_dist, dim=-1))/2
+                class_loss = -torch.log(prob_fusion[range(B),targets[range(B)]]).mean()
+            else:
+                class_loss = self.classifier_criterion(logits, targets)
+            
+            actor_loss = torch.tensor(0.).cuda()
+            critic_loss = torch.tensor(0.).cuda()
+
+            # upto_now_loc = self.one_step_ahead_loc
+            
             # ''' check for T>0 '''
-            upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
+            # upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+            # feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
 
             # ''' Consistency '''
-            logits_dist = self.head_dist(feat_dist)
-            dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
-            dist_loss = torch.tensor(0.).to(x.device)
+            # logits_dist = self.head_dist(feat_dist)
+            # dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
 
-            ''' CLS tasks '''
-            logits = self.head(feat)
+            # ''' CLS tasks '''
+            # logits = self.head(feat)
             # if dist_loss==torch.zeros(1).mean():
             #     prob_fusion = (torch.softmax(logits, dim=-1) + torch.softmax(logits_dist, dim=-1))/2
             #     class_loss = -torch.log(prob_fusion[range(B),targets[range(B)]]).mean()
             # else:
             #     class_loss = self.classifier_criterion(logits, targets)
 
-            # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
-            print('logits_one_step', logits_one_step)
-            logits_one_step = self.predict_one_step_ahead(upto_now_loc, feat, feat_dist, x_pos, None)
-            class_loss = self.classifier_criterion(logits_one_step, targets)
-            
-
             # ''' Do actor-critic if tempT < T. We optimize only classifier for the last glimpse; next glimpse location is stored in the function '''
             # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
             # actor_loss, critic_loss = self.actor_critic(upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher)
-            actor_loss, critic_loss = torch.tensor(0.).to(x.device), torch.tensor(0.).to(x.device)
 
-            self.return_logits = logits.detach()
+            # self.return_logits = logits.detach()
     
             return class_loss, actor_loss, critic_loss, dist_loss
 
@@ -380,7 +397,7 @@ class STAMVisionTransformer(VisionTransformer):
             else:
                 class_loss_dist = self.dist_criterion(all_logits_dist.flatten(0,1),None,None)
 
-            return all_logits, class_loss, all_logits_dist, class_loss_dist
+            return all_logits, class_loss, all_logits_dist, 
 
 
     def recon_glimpse(self, x, loc):
@@ -410,3 +427,4 @@ class STAMVisionTransformer(VisionTransformer):
 
 
 
+# 
