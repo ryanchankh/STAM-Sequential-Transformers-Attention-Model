@@ -131,26 +131,76 @@ class STAMVisionTransformer(VisionTransformer):
         B = feat.size(0)
         T = future_loc.size(1)
         loc_pos = torch.gather(self.loc_pos_embed.repeat(B, 1, 1), 1, future_loc[:,:,None].repeat(1,1,self.embed_dim))
+        print(loc_pos.shape)
         feat_loc_pos = torch.cat([feat[:,None,:].repeat(1,T,1), loc_pos],-1)
+        print(feat_loc_pos.shape)
         unnormalized_prob = self.location_module(feat_loc_pos.flatten(0,1)).reshape(feat_loc_pos.size()[:2]) # (B, T, 2*C) -> (B, T, 1) -> (B, T)
-
         return unnormalized_prob
 
-    def select_loc_from_unnormalized_prob(self, unnormalized_prob, future_loc, howmany):
-        if self.location_module.training:
-            unnormalized_prob = unnormalized_prob / unnormalized_prob.norm(dim=-1, keepdim=True)
-            prob = (unnormalized_prob * self.loc_tau).softmax(dim=1)
-            logpi = F.log_softmax(unnormalized_prob * self.loc_tau, dim=1)
-            samples = torch.multinomial(prob, howmany, replacement=True) # shape: (B, howmany)
-            locs = torch.gather(future_loc, 1, samples)
-            logpi = torch.gather(logpi, 1, samples)
-            return locs, logpi
-        else:
-            prob = (unnormalized_prob).softmax(dim=1)
-            samples = torch.topk(prob, k=howmany, dim=1)[1] #torch.multinomial(prob, self.stepT, replacement=False)
-            locs = torch.gather(future_loc, 1, samples)
-            return locs
+    # def select_loc_from_unnormalized_prob(self, unnormalized_prob, future_loc, howmany):
+    #     tau = 0.5
+    #     if self.location_module.training:
+    #         # unnormalized_prob = unnormalized_prob / unnormalized_prob.norm(dim=-1, keepdim=True)
 
+    #         query_mask = torch.where(mask ==1, -1e9, 0.)
+    #         query_logits = query_logits + query_mask.cuda()
+        
+    #         # straight through softmax
+    #         query_prob = (query_logits / tau).softmax(dim=1)
+    #         query = ((query_logits / 1e-9).softmax(dim=1) - query).detach() + query
+    #         return query, query_prob
+    #         # prob = (unnormalized_prob * self.loc_tau).softmax(dim=1)
+    #         # logpi = F.log_softmax(unnormalized_prob * self.loc_tau, dim=1)
+    #         # samples = torch.multinomial(prob, howmany, replacement=True) # shape: (B, howmany)
+    #         # locs = torch.gather(future_loc, 1, samples)
+    #         # logpi = torch.gather(logpi, 1, samples)
+    #         # return locs, logpi
+    #     else:
+    #         prob = (unnormalized_prob).softmax(dim=1)
+    #         samples = torch.topk(prob, k=howmany, dim=1)[1] #torch.multinomial(prob, self.stepT, replacement=False)
+    #         locs = torch.gather(future_loc, 1, samples)
+    #         return locs
+
+    def query_loc_from_unnormalized_prob(self, query_logits, candidate_mask, tau=0.5):
+        # masking 
+        query_mask = torch.where(candidate_mask==0, -1e9, 0.)
+        query_logits = query_logits + query_mask.cuda()
+        
+        # straight through softmax
+        query_prob = (query_logits / tau).softmax(dim=1) # (B, no. of glimpses)
+        query_prob = ((query_logits / 1e-9).softmax(dim=1) - query_prob).detach() + query_prob
+        return query_prob, query_prob.argmax(-1)
+    
+    # def select_loc_from_unnormalized_prob(self, query_logits, mask):
+    #     tau = 0.5
+    #     query_mask = torch.where(mask ==1, -1e9, 0.)
+    #     query_logits = query_logits + query_mask.cuda()
+    
+    #     # straight through softmax
+    #     query = (query_logits / tau).softmax(dim=1) # (B, no. of glimpses)
+    #     query = ((query_logits / 1e-9).softmax(dim=1) - query).detach() + query
+    #     return query, query_prob
+        # if self.location_module.training:
+        #     # unnormalized_prob = unnormalized_prob / unnormalized_prob.norm(dim=-1, keepdim=True)
+
+        #     query_mask = torch.where(mask ==1, -1e9, 0.)
+        #     query_logits = query_logits + query_mask.cuda()
+        
+        #     # straight through softmax
+        #     query_prob = (query_logits / tau).softmax(dim=1)
+        #     query = ((query_logits / 1e-9).softmax(dim=1) - query).detach() + query
+        #     return query, query_prob
+        #     # prob = (unnormalized_prob * self.loc_tau).softmax(dim=1)
+        #     # logpi = F.log_softmax(unnormalized_prob * self.loc_tau, dim=1)
+        #     # samples = torch.multinomial(prob, howmany, replacement=True) # shape: (B, howmany)
+        #     # locs = torch.gather(future_loc, 1, samples)
+        #     # logpi = torch.gather(logpi, 1, samples)
+        #     # return locs, logpi
+        # else:
+        #     prob = (unnormalized_prob).softmax(dim=1)
+        #     samples = torch.topk(prob, k=howmany, dim=1)[1] #torch.multinomial(prob, self.stepT, replacement=False)
+        #     locs = torch.gather(future_loc, 1, samples)
+        #     return locs
 
     def normalize_using_running_stats(self, measure, value, time_idx):
         B = value.numel()
@@ -261,6 +311,7 @@ class STAMVisionTransformer(VisionTransformer):
     def select_one_random_future_loc(self, upto_now_loc):
         B = upto_now_loc.size(0)
         all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(upto_now_loc.device)
+        # all_loc: (B, total no. of glimpses)
         candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, upto_now_loc, 0.).bool()
         candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - self.tempT)
         samples = torch.randint(candidate_loc.size(1), (B,1)).to(upto_now_loc.device)
@@ -289,25 +340,29 @@ class STAMVisionTransformer(VisionTransformer):
             x_pos = x_pos.view(B, self.num_glimpse_per_dim**2, self.num_patch_per_dim_glimpse**2, self.embed_dim)
 
             # sample history
-            mask_indices_length = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(1,))
-            mask_indices = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), mask_indices_length, replacement=False) for _ in range(B)])
-            sampled_history = torch.gather(x_pos, 1, mask_indices[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))
-            feat, feat_dist = self.extract_features_of_glimpses(sampled_history)
-            upto_now_loc = mask_indices
+            history_sampled_len = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(1,))[0]
+            history_sampled_idx = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), history_sampled_len, replacement=False) for _ in range(B)])
+            history_sampled = torch.gather(x_pos, 1, history_sampled_idx[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))
+            upto_now_loc = history_sampled_idx
+            feat, feat_dist = self.extract_features_of_glimpses(history_sampled)
 
-            # add one query
+            # mask out queries in history
+            # candidate_loc_mask sets patches in history as 0, unselected patches as 1
             all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(feat.device)
             candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, upto_now_loc, 0.).bool()
-            candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - self.tempT)
-            unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
-            future_loc, logpi = self.select_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
-            one_step_ahead_loc = torch.cat([upto_now_loc, future_loc], 1)
+            candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - history_sampled_len)
             
+            # query from location module
+            unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
+            query_prob, query_idx = self.query_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
+            
+            # append query answer to history
+            query_vec = (x_pos * query_prob[:, :, None, None].repeat(1, 1, self.num_glimpse_per_dim**2, self.embed_dim)).sum(dim=1)
+            history_updated = torch.cat([history_sampled, query_vec], dim=1)
+
             # forward classifier
-            one_step_ahead_x_pos = x_pos.gather(1, one_step_ahead_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            feat_one_step_ahead, feat_dist_one_step_ahead = self.extract_features_of_glimpses(one_step_ahead_x_pos)
-            logits_future = self.head(feat_one_step_ahead)
-            logits_dist_future = self.head_dist(feat_dist_one_step_ahead)
+            logits = self.head(history_updated)
+            logits_dist = self.head_dist(history_updated)
             
             # compute distillation losses
             dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
@@ -321,31 +376,6 @@ class STAMVisionTransformer(VisionTransformer):
             
             actor_loss = torch.tensor(0.).cuda()
             critic_loss = torch.tensor(0.).cuda()
-
-            # upto_now_loc = self.one_step_ahead_loc
-            
-            # ''' check for T>0 '''
-            # upto_now_x_pos = x_pos.gather(1, upto_now_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
-            # feat, feat_dist = self.extract_features_of_glimpses(upto_now_x_pos)
-
-            # ''' Consistency '''
-            # logits_dist = self.head_dist(feat_dist)
-            # dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
-
-            # ''' CLS tasks '''
-            # logits = self.head(feat)
-            # if dist_loss==torch.zeros(1).mean():
-            #     prob_fusion = (torch.softmax(logits, dim=-1) + torch.softmax(logits_dist, dim=-1))/2
-            #     class_loss = -torch.log(prob_fusion[range(B),targets[range(B)]]).mean()
-            # else:
-            #     class_loss = self.classifier_criterion(logits, targets)
-
-            # ''' Do actor-critic if tempT < T. We optimize only classifier for the last glimpse; next glimpse location is stored in the function '''
-            # prob_fusion_teacher = (torch.softmax(teacher_gt, dim=-1) + torch.softmax(teacher_dist, dim=-1))/2
-            # actor_loss, critic_loss = self.actor_critic(upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher)
-
-            # self.return_logits = logits.detach()
-    
             return class_loss, actor_loss, critic_loss, dist_loss
 
         else:
@@ -371,7 +401,7 @@ class STAMVisionTransformer(VisionTransformer):
                     candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, past_loc, 0.).bool()
                     candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - t)
                     unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
-                    current_loc = self.select_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
+                    _, current_loc = self.query_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
                     past_loc = torch.cat([past_loc, current_loc], 1)
 
                 current_x_pos = x_pos.gather(1, current_loc[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
