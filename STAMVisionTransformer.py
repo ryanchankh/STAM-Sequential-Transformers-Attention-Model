@@ -342,8 +342,8 @@ class STAMVisionTransformer(VisionTransformer):
             # sample history
             history_sampled_len = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(1,))[0]
             history_sampled_idx = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), history_sampled_len, replacement=False) for _ in range(B)])
-            history_sampled = torch.gather(x_pos, 1, history_sampled_idx[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))
-            upto_now_loc = history_sampled_idx
+            history_sampled = torch.gather(x_pos, 1, history_sampled_idx[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)).cuda())
+            upto_now_loc = history_sampled_idx.cuda()
             with torch.no_grad():
                 feat, feat_dist = self.extract_features_of_glimpses(history_sampled)
 
@@ -358,6 +358,8 @@ class STAMVisionTransformer(VisionTransformer):
             query_prob, query_idx = self.query_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
             
             # append query answer to history
+            # x_pos torch.Size([32, 49, 4, 384]) query_prob torch.Size([32, 23])
+            print('x_pos', x_pos.shape, 'query_prob', query_prob.shape)
             query_vec = (x_pos * query_prob[:, :, None, None].repeat(1, 1, self.num_glimpse_per_dim**2, self.embed_dim)).sum(dim=1)
             history_updated = torch.cat([history_sampled, query_vec], dim=1)
             feat_updated, feat_dist_updated = self.extract_features_of_glimpses(history_updated)
