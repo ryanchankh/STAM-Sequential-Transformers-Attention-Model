@@ -344,7 +344,8 @@ class STAMVisionTransformer(VisionTransformer):
             history_sampled_idx = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), history_sampled_len, replacement=False) for _ in range(B)])
             history_sampled = torch.gather(x_pos, 1, history_sampled_idx[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))
             upto_now_loc = history_sampled_idx
-            feat, feat_dist = self.extract_features_of_glimpses(history_sampled)
+            with torch.no_grad():
+                feat, feat_dist = self.extract_features_of_glimpses(history_sampled)
 
             # mask out queries in history
             # candidate_loc_mask sets patches in history as 0, unselected patches as 1
@@ -359,10 +360,12 @@ class STAMVisionTransformer(VisionTransformer):
             # append query answer to history
             query_vec = (x_pos * query_prob[:, :, None, None].repeat(1, 1, self.num_glimpse_per_dim**2, self.embed_dim)).sum(dim=1)
             history_updated = torch.cat([history_sampled, query_vec], dim=1)
+            feat_updated, feat_dist_updated = self.extract_features_of_glimpses(history_updated)
 
             # forward classifier
-            logits = self.head(history_updated)
-            logits_dist = self.head_dist(history_updated)
+            logits = self.head(feat_updated)
+            logits_dist = self.head_dist(feat_dist_updated)
+            
             
             # compute distillation losses
             dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
