@@ -67,7 +67,8 @@ class STAMVisionTransformer(VisionTransformer):
             self.location_module.add_module('bn'+str(l), nn.BatchNorm1d(mlp_hidden_dim))
             self.location_module.add_module('rl'+str(l), nn.ReLU())
             in_dim = mlp_hidden_dim
-        self.location_module.add_module('fc_final', nn.Linear(in_dim, 1))
+        # self.location_module.add_module('fc_final', nn.Linear(in_dim, 1))
+        self.location_module.add_module('fc_final', nn.Linear(in_dim, self.num_glimpse_per_dim**2))
     
         self.critic = nn.Sequential()
         in_dim = 2*self.embed_dim
