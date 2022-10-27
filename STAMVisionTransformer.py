@@ -16,6 +16,7 @@ import copy
 from torch.distributions.categorical import Categorical
 import torch.distributed as dist
 from utils_IP import *
+from utils_IP import onehot
 
 
 class STAMVisionTransformer(VisionTransformer):
@@ -368,7 +369,7 @@ class STAMVisionTransformer(VisionTransformer):
             # sample history
             history_sampled_len = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(1,))[0]
             history_sampled_idx = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), history_sampled_len, replacement=False) for _ in range(B)]).cuda()
-            history_sampled_mask = onehot(history_sampled_idx)
+            history_sampled_mask = onehot(history_sampled_idx, self.num_glimpse_per_dim**2)
             history_sampled = torch.gather(x_pos, 1, history_sampled_idx[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)).cuda())
             with torch.no_grad():
                 cls_token, dist_token = self.extract_features_of_glimpses(history_sampled)

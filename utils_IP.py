@@ -75,3 +75,11 @@ def update_masked_image_mnist(masked_image, images, query_vec, patch_size):
   
     modified_history = (masked_image + query_mask * images).clamp_(min=-1., max=1.)
     return modified_history
+
+
+
+def onehot(y, num_classes):
+    scatter_dim = len(y.size())
+    y_tensor = y.view(*y.size(), -1)
+    zeros = torch.zeros(*y.size(), num_classes, dtype=y.dtype).to(y.device)
+    return zeros.scatter(scatter_dim, y_tensor, 1)
