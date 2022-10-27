@@ -25,6 +25,25 @@ def sample_random_history(num_samples, num_queries_total, max_queries):
         indices[code_ind, random_history.flatten()] = 1.
     return indices
 
+def sample_random_history_fixed(num_samples, num_queries_total, max_queries):
+    """Sample indices in a uniformly random manner. 
+
+    Arguments: 
+        num_queries_total: total number of queries available to choose
+        max_queries: maximum number of queries to sample
+
+    Return:
+        mask_indices
+    """
+    num = torch.randint(low=0, high=max_queries, size=(1, ))[0]
+    indices_onehot = torch.zeros(num_samples, num_queries_total)
+    indices = []
+    for code_ind in range(num_samples):
+        random_history = torch.multinomial(torch.ones(indices.size(1)), num, replacement=False)
+        indices_onehot[code_ind, random_history.flatten()] = 1.
+        indices.append(random_history.flatten())
+    return indices_onehot, torch.stack(indices_onehot)
+
 
 def mask_image_from_indices_mnist(images, query_indices, patch_size):
     """Obtain masked images, with patch unveiled at indices.
