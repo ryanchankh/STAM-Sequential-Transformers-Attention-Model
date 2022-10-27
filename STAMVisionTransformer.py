@@ -138,6 +138,29 @@ class STAMVisionTransformer(VisionTransformer):
         unnormalized_prob = self.location_module(feat_loc_pos.flatten(0,1)).reshape(feat_loc_pos.size()[:2]) # (B, T, 2*C) -> (B, T, 1) -> (B, T)
         return unnormalized_prob
 
+    def forward_querier(self, feat, feat_dist, future_loc):
+        """
+        The input to the querier is a concatenated tensor of size (B, n_tokens, embed_dim*3)
+        which concatenates:
+            1. class_token (feat)
+            2. distillation token  (feat_distill)
+            3. features from location positional embedding
+        """
+        B = feat.size(0)
+        T = future_loc.size(1)
+
+        cls_tokens = feat.unsqueeze(1).repeat(1, T, 1) # (B, T, embed_dim)
+        dist_tokens = feat_dist.unsqueeze(1).repeat(1, T, 1) # (B, T, embed_dim)
+        loc_pos_tokens = torch.gather(self.loc_pos_embed.repeat(B, 1, 1),
+                                      1,
+                                      future_loc[:,:,None].repeat(1, 1, self.embed_dim)
+                                      ) # (B, T, embed_dim)
+        
+        querier_inputs = torch.cat([cls_tokens, dist_tokens, loc_pos_tokens], dim=-1)
+        querier_inputs = querier_inputs.flatten(0, 1) # (B * T, 3* embed_dim)
+        unnormalized_prob = self.location_module(querier_inputs)
+        return unnormalized_prob
+    
     # def select_loc_from_unnormalized_prob(self, unnormalized_prob, future_loc, howmany):
     #     tau = 0.5
     #     if self.location_module.training:
@@ -342,20 +365,13 @@ class STAMVisionTransformer(VisionTransformer):
 
             # sample history
             history_sampled_len = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(1,))[0]
-            history_sampled_idx = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), history_sampled_len, replacement=False) for _ in range(B)])
+            history_sampled_idx = torch.stack([torch.multinomial(torch.ones((self.num_glimpse_per_dim**2)), history_sampled_len, replacement=False) for _ in range(B)]).cuda()
             history_sampled = torch.gather(x_pos, 1, history_sampled_idx[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)).cuda())
-            upto_now_loc = history_sampled_idx.cuda()
             with torch.no_grad():
-                feat, feat_dist = self.extract_features_of_glimpses(history_sampled)
+                cls_token, dist_token = self.extract_features_of_glimpses(history_sampled)
 
-            # mask out queries in history
-            # candidate_loc_mask sets patches in history as 0, unselected patches as 1
-            all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(feat.device)
-            candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, upto_now_loc, 0.).bool()
-            candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - history_sampled_len)
-            
             # query from location module
-            unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
+            unnormalized_prob = self.forward_querier(cls_token, dist_token, history_sampled_idx)
             query_prob, query_idx = self.query_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
             
             # append query answer to history
@@ -368,8 +384,7 @@ class STAMVisionTransformer(VisionTransformer):
             # forward classifier
             logits = self.head(feat_updated)
             logits_dist = self.head_dist(feat_dist_updated)
-            
-            
+
             # compute distillation losses
             dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
             
