@@ -107,7 +107,7 @@ class STAMVisionTransformer(VisionTransformer):
 
         return x.flatten(1,2), pos.flatten(1,2)
 
-    def extract_features_of_glimpses(self, x_pos=None):
+    def extract_features_of_glimpses(self, x_pos=None, mask=None):
         # form input to the transformer
         if x_pos is not None:
             B = x_pos.size(0)
@@ -123,7 +123,7 @@ class STAMVisionTransformer(VisionTransformer):
  
         # processing in transformer
         for blk in self.blocks:
-            x = blk(x)
+            x = blk(x, mask)
  
         x = self.norm(x)
         return x[:,0], x[:,1]
