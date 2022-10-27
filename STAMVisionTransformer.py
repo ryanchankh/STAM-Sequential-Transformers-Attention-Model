@@ -377,10 +377,11 @@ class STAMVisionTransformer(VisionTransformer):
             history_sampled = []
             for b, n_queries_b in enumerate(n_queries):
                 n_queries_b = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=())
-                history_idx = torch.multinomial(torch.ones((self.num_glimpse_per_dim**2, )), n_queries_b, replacement=False)
+                if n_queries_b != 0:
+                    history_idx = torch.multinomial(torch.ones((self.num_glimpse_per_dim**2, )), n_queries_b, replacement=False)
+                    history_sampled.append(x_pos[b, history_idx, :])
+                    history_indices[b, history_idx] = 1.
                 attn_mask[b, :n_queries_b+2] = 1
-                history_sampled.append(x_pos[b, history_idx, :])
-                history_indices[b, history_idx] = 1.
             history_sampled = torch.nn.utils.rnn.pad_sequence(history_sampled, batch_first=True).cuda()
             history_indices = history_indices.cuda()
 

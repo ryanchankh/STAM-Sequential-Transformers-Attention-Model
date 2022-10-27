@@ -28,9 +28,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.helpers import build_model_with_cfg, overlay_external_default_cfg
-from timm.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
-from timm.registry import register_model
+from timm.models.helpers import build_model_with_cfg, overlay_external_default_cfg
+from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
+from timm.models.registry import register_model
 
 _logger = logging.getLogger(__name__)
 
@@ -151,6 +151,7 @@ class Attention(nn.Module):
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         if mask is not None:
+            mask = mask.unsqueeze(1).unsqueeze(-2)
             attn = attn.masked_fill(mask==0., -1e9)
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
