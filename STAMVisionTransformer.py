@@ -20,6 +20,9 @@ from utils_IP import *
 from utils_IP import onehot
 
 
+
+
+
 class STAMVisionTransformer(VisionTransformer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -48,6 +51,15 @@ class STAMVisionTransformer(VisionTransformer):
         self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
         trunc_normal_(self.dist_token, std=.02)
+
+    def idx2idx(self):
+        A = torch.zeros((196, 49))
+        for k in range(A.shape[1]):
+            A[k // 7 * 28 + k % 7 * 2, k] = 1.
+            A[k // 7 * 28 + k % 7 * 2 + 1, k] = 1
+            A[k // 7 * 28 + k % 7 * 2 + 14, k] = 1
+            A[k // 7 * 28 + k % 7 * 2 + 14 + 1, k] = 1
+        self.idx_mat = A
 
     def set_mode(self, T, stepT, mlp_layers, mlp_hidden_dim):
         self.T = T
@@ -372,7 +384,7 @@ class STAMVisionTransformer(VisionTransformer):
 
             # sample history
             n_queries = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(B, ))
-            attn_mask = torch.zeros((B, self.num_glimpse_per_dim**2+2)).cuda()
+            attn_mask = torch.zeros((B, self.num_glimpse_per_dim**2))
             history_indices = torch.zeros((B, self.num_glimpse_per_dim**2))
             history_sampled = []
             for b, n_queries_b in enumerate(n_queries):
@@ -381,7 +393,8 @@ class STAMVisionTransformer(VisionTransformer):
                     history_idx = torch.multinomial(torch.ones((self.num_glimpse_per_dim**2, )), n_queries_b, replacement=False)
                     history_sampled.append(x_pos[b, history_idx, :])
                     history_indices[b, history_idx] = 1.
-                attn_mask[b, :n_queries_b+2] = 1
+                attn_mask[b, :n_queries_b] = 1
+            attn_mask = torch.cat([torch.ones((B, 2)), attn_mask @ self.idx_mat.T], dim=1).cuda() # append class and distill tokens
             history_sampled = torch.nn.utils.rnn.pad_sequence(history_sampled, batch_first=True).cuda()
             history_indices = history_indices.cuda()
 
