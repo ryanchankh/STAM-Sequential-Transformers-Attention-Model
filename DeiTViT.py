@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from timm.models.vision_transformer import VisionTransformer
+# from timm.models.vision_transformer import VisionTransformer
+from vision_transformer import VisionTransformer
 from timm.models.layers import trunc_normal_
 from patch_embed import PatchEmbed
 
