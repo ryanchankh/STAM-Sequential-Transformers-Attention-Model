@@ -85,16 +85,16 @@ class STAMVisionTransformer(VisionTransformer):
         self.location_module.add_module('fc_final', nn.Linear(in_dim, 1))
 #        self.location_module.add_module('fc_final', nn.Linear(in_dim, self.num_glimpse_per_dim**2))
     
-        self.critic = nn.Sequential()
-        in_dim = 2*self.embed_dim
-        for l in range(mlp_layers-1):
-            self.critic.add_module('fc'+str(l), nn.Linear(in_dim, mlp_hidden_dim//4))
-            self.critic.add_module('bn'+str(l), nn.BatchNorm1d(mlp_hidden_dim//4))
-            self.critic.add_module('rl'+str(l), nn.ReLU())
-            in_dim = mlp_hidden_dim//4
-        self.critic.add_module('fc_final', nn.Linear(in_dim, 1))
-        self.critic.apply(self._init_weights)
-        self.critic[-1].bias.data += 0.58
+        # self.critic = nn.Sequential()
+        # in_dim = 2*self.embed_dim
+        # for l in range(mlp_layers-1):
+        #     self.critic.add_module('fc'+str(l), nn.Linear(in_dim, mlp_hidden_dim//4))
+        #     self.critic.add_module('bn'+str(l), nn.BatchNorm1d(mlp_hidden_dim//4))
+        #     self.critic.add_module('rl'+str(l), nn.ReLU())
+        #     in_dim = mlp_hidden_dim//4
+        # self.critic.add_module('fc_final', nn.Linear(in_dim, 1))
+        # self.critic.apply(self._init_weights)
+        # self.critic[-1].bias.data += 0.58
     
         popart_var = self.T-1-torch.arange(self.T-1).double()
         self.register_buffer('running_mean_popart'       , torch.zeros(self.T-1))
@@ -156,7 +156,7 @@ class STAMVisionTransformer(VisionTransformer):
         unnormalized_prob = self.location_module(feat_loc_pos.flatten(0,1)).reshape(feat_loc_pos.size()[:2]) # (B, T, 2*C) -> (B, T, 1) -> (B, T)
         return unnormalized_prob
 
-    def forward_querier(self, feat, feat_dist, mask, tau=1.):
+    def forward_querier(self, feat, feat_dist, candidate_loc, candidate_mask, tau=0.5):
         """
         The input to the querier is a concatenated tensor of size (B, n_tokens, embed_dim*3)
         which concatenates:
@@ -165,23 +165,26 @@ class STAMVisionTransformer(VisionTransformer):
             3. features from location positional embedding
         """
         B = feat.size(0)
-        T = self.num_glimpse_per_dim**2
+        T_max = candidate_mask.sum(1).max()
 
-        feat = feat.unsqueeze(1).repeat(1, T, 1) # (B, T, embed_dim)
-        feat_dist = feat_dist.unsqueeze(1).repeat(1, T, 1) # (B, T, embed_dim)
-        loc_pos_tokens = self.loc_pos_embed.repeat(B, 1, 1) # (B, N, embed_dim)
-        #print('feat feat_dist', feat.shape, feat_dist.shape, loc_pos_tokens.shape)
-        querier_inputs = torch.cat([feat, feat_dist, loc_pos_tokens], dim=-1)
+        # concatenate features
+        loc_pos = torch.gather(self.loc_pos_embed.repeat(B, 1, 1), 1, candidate_loc[:,:,None].repeat(1,1,self.embed_dim))
+        feat = feat.unsqueeze(1).repeat(1, T_max, 1) # (B, T, embed_dim)
+        feat_dist = feat_dist.unsqueeze(1).repeat(1, T_max, 1) # (B, T, embed_dim)
+        querier_inputs = torch.cat([feat, feat_dist, loc_pos], dim=-1)
+
+        # forward location module
         querier_inputs = querier_inputs.flatten(0, 1) # (B * T, 3* embed_dim)
         unnormalized_prob = self.location_module(querier_inputs)
-        query_logits = unnormalized_prob.reshape(B, T)    
+        query_logits = unnormalized_prob.reshape(B, T_max)   
+        query_logits = query_logits.masked_fill(candidate_mask==0., float('-inf')) 
         
 #        query_mask = torch.where(mask==1, -1e4, 0.).cuda()
 #        print('query_mask', query_mask.isnan().sum())
 #        query_logits = query_logits + query_mask
 #        print('query logits + mask', query_logits + query_mask)
 #        print('query logits min max', query_logits.min(), query_logits.max())
-        query_logits = query_logits.masked_fill(mask.bool(), float('-inf'))
+        # query_logits = query_logits.masked_fill(mask.bool(), float('-inf'))
 #        print('dtype', query_logits.dtype)
 #        print('query loigt mask fill', query_logits)
 #        print('after mask query logits min max', query_logits.min(), query_logits.max())
@@ -196,7 +199,7 @@ class STAMVisionTransformer(VisionTransformer):
 #            print('query_prob1', query_prob.min(), query_prob.max(), query_prob.isnan().sum(), query_prob.sum(1))
         query_prob = (hardargmax(query_logits, dim=1) - query_prob).detach() + query_prob
 #            print('query_prob2', query_prob.min(), query_prob.max(), query_prob.isnan().sum(), query_prob.sum(1))
-        return query_prob
+        return query_prob, candidate_loc
     # def select_loc_from_unnormalized_prob(self, unnormalized_prob, future_loc, howmany):
     #     tau = 0.5
     #     if self.location_module.training:
@@ -404,33 +407,44 @@ class STAMVisionTransformer(VisionTransformer):
             n_queries = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(B, ))
             #print('n_queries', n_queries)
             attn_mask = torch.zeros((B, n_queries.max()*4))
-            history_indices = torch.zeros((B, self.num_glimpse_per_dim**2))
+            history_indices_onehot = torch.zeros((B, self.num_glimpse_per_dim**2))
+            history_indices = []
             history_sampled = []
             for b, n_queries_b in enumerate(n_queries):
                 if n_queries_b != 0:
                     history_idx = torch.multinomial(torch.ones((self.num_glimpse_per_dim**2, )), n_queries_b, replacement=False)
                     history_sampled.append(x_pos[b, history_idx, :])
 #                    print('history_sampled b', x_pos[b, history_idx, :].shape)
-                    history_indices[b, history_idx] = 1.
+                    history_indices_onehot[b, history_idx] = 1.
+                    history_indices.append(history_idx)
                 else:
                     history_sampled.append(torch.zeros((1, x_pos.size(2), x_pos.size(3))))
+                    history_indices.append([])
                 attn_mask[b, :n_queries_b*4] = 1
             attn_mask = torch.cat([torch.ones((B, 2)), attn_mask], dim=1).cuda() # append class and distill tokens
             history_sampled = torch.nn.utils.rnn.pad_sequence(history_sampled, batch_first=True).cuda()
+            history_indices = torch.nn.utils.rnn.pad_sequence(history_indices, batch_first=True, padding_value=0.).cuda()
             #print('max', n_queries.max())
             #print('history_sampled padded', history_sampled.shape)
-            history_indices = history_indices.cuda()
+            history_indices_onehot = history_indices_onehot.cuda()
 
             # query from location module
-            #print('attn mask', attn_mask.shape)
-            with torch.no_grad():
-               feat, feat_dist = self.extract_features_of_glimpses(history_sampled, attn_mask)
-            query_prob = self.forward_querier(feat, feat_dist, history_indices)
+            query_loc = []
+            query_mask = torch.zeros((B, self.num_glimpse_per_dim**2)).cuda()
+            for i in range(history_indices_onehot):
+                query_loc.append(
+                    torch.arange(self.num_glimpse_per_dim**2)[(1 - history_indices_onehot[i]).bool()]
+                )
+                query_mask[i, :(1 - history_indices_onehot[i]).sum()]
+            query_loc = torch.nn.utils.rnn.pad_sequence(query_mask, batch_first=True, padding_value=0)
+            feat, feat_dist = self.extract_features_of_glimpses(history_sampled, attn_mask)
+            query_prob = self.forward_querier(feat, feat_dist, query_loc, query_mask)
             
             # append query answer to history
             #print('query_prob', query_prob.shape, x_pos.shape)
-            query_vec = (x_pos * query_prob[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)).sum(dim=1, keepdim=True)
-            #print('query_vec', query_vec.shape)
+            query_prob = query_prob[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)
+            query_x = x_pos.gather(1, query_loc) 
+            query_vec = (query_x * query_prob).sum(dim=1, keepdim=True)
             history_updated = torch.cat([history_sampled, query_vec], dim=1)
             attn_mask_updated = torch.cat([attn_mask, torch.ones((B, 4)).cuda()], dim=1)
             #print('history updated', history_updated.shape)
@@ -473,14 +487,24 @@ class STAMVisionTransformer(VisionTransformer):
                     history = torch.zeros((B, 0, self.num_patch_per_dim_glimpse**2, self.embed_dim)).cuda()
                     with torch.no_grad():
                         feat, feat_dist = self.extract_features_of_glimpses(history)
+                        
+                query_loc = []
+                query_mask = torch.zeros((B, self.num_glimpse_per_dim**2)).cuda()
+                for i in range(history_indices_onehot):
+                    query_loc.append(
+                        torch.arange(self.num_glimpse_per_dim**2)[(1 - history_idx[i]).bool()]
+                    )
+                    query_mask[i, :(1 - history_idx[i]).sum()]
+                query_loc = torch.nn.utils.rnn.pad_sequence(query_mask, batch_first=True, padding_value=0)
                 with torch.no_grad():
-                    query_prob = self.forward_querier(feat, feat_dist, history_idx)
-#                print('query_prob', query_prob)
-#                print('query_prob.argmax', query_prob.argmax(-1))
-                history_idx[np.arange(B), query_prob.argmax(-1)] = 1.   
+                    query_prob = self.forward_querier(feat, feat_dist, query_loc, query_mask)
+                    
+                query_prob = query_prob[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)
+                query_x = x_pos.gather(1, query_loc) 
+                query_vec = (query_x * query_prob).sum(dim=1, keepdim=True)
+                history_updated = torch.cat([history_sampled, query_vec], dim=1)
 #                print('history_idx', t, history_idx[:10, :10])
                 history = x_pos * history_idx[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)
-                attn_mask = torch.cat([torch.ones((B, 2)).cuda(), history_idx  @ self.idx_mat.T.cuda()], dim=1).cuda() # append class and distill tokens
                 with torch.no_grad():
                     feat, feat_dist = self.extract_features_of_glimpses(history, attn_mask)
 #                    print('history idx sum', history_idx.sum(-1))
