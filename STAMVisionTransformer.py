@@ -423,7 +423,8 @@ class STAMVisionTransformer(VisionTransformer):
 
             # query from location module
             #print('attn mask', attn_mask.shape)
-            feat, feat_dist = self.extract_features_of_glimpses(history_sampled, attn_mask)
+            with torch.no_grad():
+               feat, feat_dist = self.extract_features_of_glimpses(history_sampled, attn_mask)
             query_prob = self.forward_querier(feat, feat_dist, history_indices)
             
             # append query answer to history
