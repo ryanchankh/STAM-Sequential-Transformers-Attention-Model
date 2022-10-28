@@ -106,6 +106,7 @@ def train_one_epoch(model: torch.nn.Module,
         metric_logger.update(actor_loss=actor_loss_value)
         metric_logger.update(critic_loss=critic_loss_value)
 
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     with (output_dir / "log.txt").open("a") as f:

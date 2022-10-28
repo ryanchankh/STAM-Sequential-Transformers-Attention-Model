@@ -152,7 +152,8 @@ class Attention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         if mask is not None:
             mask = mask.unsqueeze(1).unsqueeze(-2)
-            attn = attn.masked_fill(mask==0., -1e9)
+            #print('mask', mask.shape)
+            attn = attn.masked_fill(mask==0., -1e4)
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
