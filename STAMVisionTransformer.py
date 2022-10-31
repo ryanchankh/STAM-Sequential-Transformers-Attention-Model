@@ -4,8 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-# from timm.models.vision_transformer import VisionTransformer
-from vision_transformer import VisionTransformer
+from timm.models.vision_transformer import VisionTransformer
 from timm.models.layers import trunc_normal_
 from torchvision.utils import save_image
 from patch_embed import PatchEmbed
@@ -16,10 +15,8 @@ import copy
 
 from torch.distributions.categorical import Categorical
 import torch.distributed as dist
-from utils_IP import *
 
-
-
+from utils_IP import hardargmax
 
 
 class STAMVisionTransformer(VisionTransformer):
@@ -51,17 +48,6 @@ class STAMVisionTransformer(VisionTransformer):
 
         trunc_normal_(self.dist_token, std=.02)
 
-        self.idx2idx()
-
-    def idx2idx(self):
-        A = torch.zeros((196, 49))
-        for k in range(A.shape[1]):
-            A[k // 7 * 28 + k % 7 * 2, k] = 1.
-            A[k // 7 * 28 + k % 7 * 2 + 1, k] = 1
-            A[k // 7 * 28 + k % 7 * 2 + 14, k] = 1
-            A[k // 7 * 28 + k % 7 * 2 + 14 + 1, k] = 1
-        self.idx_mat = A
-
     def set_mode(self, T, stepT, mlp_layers, mlp_hidden_dim):
         self.T = T
         self.stepT = stepT
@@ -83,18 +69,17 @@ class STAMVisionTransformer(VisionTransformer):
             self.location_module.add_module('rl'+str(l), nn.ReLU())
             in_dim = mlp_hidden_dim
         self.location_module.add_module('fc_final', nn.Linear(in_dim, 1))
-#        self.location_module.add_module('fc_final', nn.Linear(in_dim, self.num_glimpse_per_dim**2))
     
-        # self.critic = nn.Sequential()
-        # in_dim = 2*self.embed_dim
-        # for l in range(mlp_layers-1):
-        #     self.critic.add_module('fc'+str(l), nn.Linear(in_dim, mlp_hidden_dim//4))
-        #     self.critic.add_module('bn'+str(l), nn.BatchNorm1d(mlp_hidden_dim//4))
-        #     self.critic.add_module('rl'+str(l), nn.ReLU())
-        #     in_dim = mlp_hidden_dim//4
-        # self.critic.add_module('fc_final', nn.Linear(in_dim, 1))
-        # self.critic.apply(self._init_weights)
-        # self.critic[-1].bias.data += 0.58
+        self.critic = nn.Sequential()
+        in_dim = 2*self.embed_dim
+        for l in range(mlp_layers-1):
+            self.critic.add_module('fc'+str(l), nn.Linear(in_dim, mlp_hidden_dim//4))
+            self.critic.add_module('bn'+str(l), nn.BatchNorm1d(mlp_hidden_dim//4))
+            self.critic.add_module('rl'+str(l), nn.ReLU())
+            in_dim = mlp_hidden_dim//4
+        self.critic.add_module('fc_final', nn.Linear(in_dim, 1))
+        self.critic.apply(self._init_weights)
+        self.critic[-1].bias.data += 0.58
     
         popart_var = self.T-1-torch.arange(self.T-1).double()
         self.register_buffer('running_mean_popart'       , torch.zeros(self.T-1))
@@ -113,7 +98,6 @@ class STAMVisionTransformer(VisionTransformer):
         x = x.unfold(2,self.patch_size,self.patch_size).unfold(3,self.patch_size,self.patch_size) # (B, 3, 224, 224) -> (B,3,14,14,16,16)
         x = x.unfold(2,self.num_patch_per_dim_glimpse,self.num_patch_per_dim_glimpse).unfold(3,self.num_patch_per_dim_glimpse,self.num_patch_per_dim_glimpse)     # (B,3,14,14,16,16) -> (B,3,7,7,16,16,2,2)
         x = x.permute(0,2,3,6,7,1,4,5)        # (B,3,7,7,16,16,2,2) -> (B,7,7,2,2,3,16,16) = (B, num_glimpses_per_dim, num_glimpses_per_dim, num_patches_per_glimpse, num_patches_per_glimpse, 3, 16, 16)
-        #print('x in prepare glimpses', x.shape)
 
         pos = self.pos_embed[:,2:,:].reshape(1,self.num_patch_per_dim,self.num_patch_per_dim,self.embed_dim)
         pos = pos.unfold(1,self.num_patch_per_dim_glimpse,self.num_patch_per_dim_glimpse).unfold(2,self.num_patch_per_dim_glimpse,self.num_patch_per_dim_glimpse) # (1,14,14,C) -> (1,7,7,C,2,2)
@@ -121,23 +105,23 @@ class STAMVisionTransformer(VisionTransformer):
 
         return x.flatten(1,2), pos.flatten(1,2)
 
-    def extract_features_of_glimpses(self, x_pos=None, mask=None):
-        #print('x_pos', x_pos.shape)
+    def extract_features_of_glimpses(self, x_pos):
         # form input to the transformer
-        if x_pos is not None:
-            B = x_pos.size(0)
 
+        B = x_pos.size(0)
+        
+        cls_pos = self.cls_token.expand(B, -1, -1) + self.pos_embed[:,:1,:]
+        dist_pos = self.dist_token.expand(B, -1, -1) + self.pos_embed[:,1:2,:]
+
+        if x_pos is not None:
             x_pos = x_pos.flatten(1,2)
-            cls_pos = self.cls_token.expand(B, -1, -1) + self.pos_embed[:,:1,:]
-            dist_pos = self.dist_token.expand(B, -1, -1) + self.pos_embed[:,1:2,:]
             x = torch.cat((cls_pos, dist_pos, x_pos), dim=1)
         else:
             x = torch.cat((cls_pos, dist_pos), dim=1)
-        #print('x', x.shape)
  
         # processing in transformer
         for blk in self.blocks:
-            x = blk(x, mask)
+            x = blk(x)
  
         x = self.norm(x)
         return x[:,0], x[:,1]
@@ -150,120 +134,26 @@ class STAMVisionTransformer(VisionTransformer):
         B = feat.size(0)
         T = future_loc.size(1)
         loc_pos = torch.gather(self.loc_pos_embed.repeat(B, 1, 1), 1, future_loc[:,:,None].repeat(1,1,self.embed_dim))
-        #print(loc_pos.shape)
         feat_loc_pos = torch.cat([feat[:,None,:].repeat(1,T,1), loc_pos],-1)
-        #print(feat_loc_pos.shape)
         unnormalized_prob = self.location_module(feat_loc_pos.flatten(0,1)).reshape(feat_loc_pos.size()[:2]) # (B, T, 2*C) -> (B, T, 1) -> (B, T)
+
         return unnormalized_prob
 
-    def forward_querier(self, feat, feat_dist, candidate_loc, candidate_mask, tau=0.5):
-        """
-        The input to the querier is a concatenated tensor of size (B, n_tokens, embed_dim*3)
-        which concatenates:
-            1. class_token (feat)
-            2. distillation token  (feat_distill)
-            3. features from location positional embedding
-        """
-        B = feat.size(0)
-        T_max = candidate_mask.sum(1).max()
+    def select_loc_from_unnormalized_prob(self, unnormalized_prob, future_loc, howmany):
+        if self.location_module.training:
+            unnormalized_prob = unnormalized_prob / unnormalized_prob.norm(dim=-1, keepdim=True)
+            prob = (unnormalized_prob * self.loc_tau).softmax(dim=1)
+            logpi = F.log_softmax(unnormalized_prob * self.loc_tau, dim=1)
+            samples = torch.multinomial(prob, howmany, replacement=True) # shape: (B, howmany)
+            locs = torch.gather(future_loc, 1, samples)
+            logpi = torch.gather(logpi, 1, samples)
+            return locs, logpi
+        else:
+            prob = (unnormalized_prob).softmax(dim=1)
+            samples = torch.topk(prob, k=howmany, dim=1)[1] #torch.multinomial(prob, self.stepT, replacement=False)
+            locs = torch.gather(future_loc, 1, samples)
+            return locs
 
-        # concatenate features
-        loc_pos = torch.gather(self.loc_pos_embed.repeat(B, 1, 1), 1, candidate_loc[:,:,None].repeat(1,1,self.embed_dim))
-        feat = feat.unsqueeze(1).repeat(1, T_max, 1) # (B, T, embed_dim)
-        feat_dist = feat_dist.unsqueeze(1).repeat(1, T_max, 1) # (B, T, embed_dim)
-        querier_inputs = torch.cat([feat, feat_dist, loc_pos], dim=-1)
-
-        # forward location module
-        querier_inputs = querier_inputs.flatten(0, 1) # (B * T, 3* embed_dim)
-        unnormalized_prob = self.location_module(querier_inputs)
-        query_logits = unnormalized_prob.reshape(B, T_max)   
-        query_logits = query_logits.masked_fill(candidate_mask==0., float('-inf')) 
-        
-#        query_mask = torch.where(mask==1, -1e4, 0.).cuda()
-#        print('query_mask', query_mask.isnan().sum())
-#        query_logits = query_logits + query_mask
-#        print('query logits + mask', query_logits + query_mask)
-#        print('query logits min max', query_logits.min(), query_logits.max())
-        # query_logits = query_logits.masked_fill(mask.bool(), float('-inf'))
-#        print('dtype', query_logits.dtype)
-#        print('query loigt mask fill', query_logits)
-#        print('after mask query logits min max', query_logits.min(), query_logits.max())
-        
-#        print('query sum', query_logits.sum(1))
-#        print('query_logits', query_logits.isnan().sum(), query_logits)
-#        print('e^ logits', torch.exp(query_logits).isnan().sum(), torch.exp(query_logits))
-#        print('e^ logits / sum', torch.exp(query_logits) / torch.exp(query_logits).sum(1, keepdim=True))
-        
-        # straight through softmax
-        query_prob = (query_logits / tau).softmax(dim=1) # (B, no. of glimpses)
-#            print('query_prob1', query_prob.min(), query_prob.max(), query_prob.isnan().sum(), query_prob.sum(1))
-        query_prob = (hardargmax(query_logits, dim=1) - query_prob).detach() + query_prob
-#            print('query_prob2', query_prob.min(), query_prob.max(), query_prob.isnan().sum(), query_prob.sum(1))
-        return query_prob, candidate_loc
-    # def select_loc_from_unnormalized_prob(self, unnormalized_prob, future_loc, howmany):
-    #     tau = 0.5
-    #     if self.location_module.training:
-    #         # unnormalized_prob = unnormalized_prob / unnormalized_prob.norm(dim=-1, keepdim=True)
-
-    #         query_mask = torch.where(mask ==1, -1e9, 0.)
-    #         query_logits = query_logits + query_mask.cuda()
-        
-    #         # straight through softmax
-    #         query_prob = (query_logits / tau).softmax(dim=1)
-    #         query = ((query_logits / 1e-9).softmax(dim=1) - query).detach() + query
-    #         return query, query_prob
-    #         # prob = (unnormalized_prob * self.loc_tau).softmax(dim=1)
-    #         # logpi = F.log_softmax(unnormalized_prob * self.loc_tau, dim=1)
-    #         # samples = torch.multinomial(prob, howmany, replacement=True) # shape: (B, howmany)
-    #         # locs = torch.gather(future_loc, 1, samples)
-    #         # logpi = torch.gather(logpi, 1, samples)
-    #         # return locs, logpi
-    #     else:
-    #         prob = (unnormalized_prob).softmax(dim=1)
-    #         samples = torch.topk(prob, k=howmany, dim=1)[1] #torch.multinomial(prob, self.stepT, replacement=False)
-    #         locs = torch.gather(future_loc, 1, samples)
-    #         return locs
-
-    def query_loc_from_unnormalized_prob(self, query_logits, candidate_mask, tau=0.5):
-        # masking 
-        query_mask = torch.where(candidate_mask==1, -1e9, 0.)
-        query_logits = query_logits + query_mask.cuda()
-        
-        # straight through softmax
-        query_prob = (query_logits / tau).softmax(dim=1) # (B, no. of glimpses)
-        query_prob = ((query_logits / 1e-9).softmax(dim=1) - query_prob).detach() + query_prob
-        return query_prob, query_prob.argmax(-1)
-    
-    # def select_loc_from_unnormalized_prob(self, query_logits, mask):
-    #     tau = 0.5
-    #     query_mask = torch.where(mask ==1, -1e9, 0.)
-    #     query_logits = query_logits + query_mask.cuda()
-    
-    #     # straight through softmax
-    #     query = (query_logits / tau).softmax(dim=1) # (B, no. of glimpses)
-    #     query = ((query_logits / 1e-9).softmax(dim=1) - query).detach() + query
-    #     return query, query_prob
-        # if self.location_module.training:
-        #     # unnormalized_prob = unnormalized_prob / unnormalized_prob.norm(dim=-1, keepdim=True)
-
-        #     query_mask = torch.where(mask ==1, -1e9, 0.)
-        #     query_logits = query_logits + query_mask.cuda()
-        
-        #     # straight through softmax
-        #     query_prob = (query_logits / tau).softmax(dim=1)
-        #     query = ((query_logits / 1e-9).softmax(dim=1) - query).detach() + query
-        #     return query, query_prob
-        #     # prob = (unnormalized_prob * self.loc_tau).softmax(dim=1)
-        #     # logpi = F.log_softmax(unnormalized_prob * self.loc_tau, dim=1)
-        #     # samples = torch.multinomial(prob, howmany, replacement=True) # shape: (B, howmany)
-        #     # locs = torch.gather(future_loc, 1, samples)
-        #     # logpi = torch.gather(logpi, 1, samples)
-        #     # return locs, logpi
-        # else:
-        #     prob = (unnormalized_prob).softmax(dim=1)
-        #     samples = torch.topk(prob, k=howmany, dim=1)[1] #torch.multinomial(prob, self.stepT, replacement=False)
-        #     locs = torch.gather(future_loc, 1, samples)
-        #     return locs
 
     def normalize_using_running_stats(self, measure, value, time_idx):
         B = value.numel()
@@ -306,28 +196,14 @@ class STAMVisionTransformer(VisionTransformer):
         target = self.normalize_using_running_stats('popart', target, self.tempT-1)
         advantage = target.detach() - value_now
 
-        actor_loss = - (logpi * advantage.detach()).mean()  
+        actor_loss = - (logpi * advantage.detach()).mean()
         critic_loss = advantage.abs().mean()
 
         with torch.no_grad():
             sigma = (self.running_var_popart[self.tempT-1] - self.running_mean_popart[self.tempT-1]**2)**0.5
             value_now = sigma * value_now + self.running_mean_popart[self.tempT-1]
         return actor_loss, critic_loss
-    
-    def predict_one_step_ahead(self, feat, feat_dist, x_pos_masked, x_pos, used_loc):
-        
-        # what's not been selected are candidates
-        candidate_loc = (1 - used_loc).abs()
-        
-        # evaluate what is the best next candidate
-        unnormalized_prob = self.evaluate_locations(torch.cat([feat, feat_dist],-1), candidate_loc)
-        future_loc, logpi = self.select_loc_from_unnormalized_prob(unnormalized_prob, candidate_loc, 1)
-        #print('future_loc', future_loc.shape)
-        
-        # select next position
-        one_step_ahead_x_pos = x_pos_masked +  future_loc * x_pos
-        return one_step_ahead_x_pos
-    
+
     def actor_critic(self, upto_now_loc, feat, feat_dist, x_pos, prob_fusion_teacher):
         if self.tempT < self.T: 
             B = feat.size(0)
@@ -374,7 +250,6 @@ class STAMVisionTransformer(VisionTransformer):
     def select_one_random_future_loc(self, upto_now_loc):
         B = upto_now_loc.size(0)
         all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(upto_now_loc.device)
-        # all_loc: (B, total no. of glimpses)
         candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, upto_now_loc, 0.).bool()
         candidate_loc = all_loc[candidate_loc_mask].reshape(B, (self.num_glimpse_per_dim**2) - self.tempT)
         samples = torch.randint(candidate_loc.size(1), (B,1)).to(upto_now_loc.device)
@@ -389,8 +264,9 @@ class STAMVisionTransformer(VisionTransformer):
         return
 
 
+
     def forward(self, x, targets, teacher_gt, teacher_dist):
-    
+
         if self.training:
 
             B = x.size(0)
@@ -401,73 +277,50 @@ class STAMVisionTransformer(VisionTransformer):
             x, pos = self.prepare_glimpses(x)
             x_pos = self.patch_embed(x.flatten(1,3)) + pos.flatten(1,3) # (B, 7*7*2*2, 3, 16, 16) -> (B, 7*7*2*2, C)
             x_pos = x_pos.view(B, self.num_glimpse_per_dim**2, self.num_patch_per_dim_glimpse**2, self.embed_dim)
-            #print('x pos in forward', x_pos.shape)
 
-            # sample history
-            n_queries = torch.randint(low=0, high=self.num_glimpse_per_dim**2, size=(B, ))
-            #print('n_queries', n_queries)
-            attn_mask = torch.zeros((B, n_queries.max()*4))
-            history_indices_onehot = torch.zeros((B, self.num_glimpse_per_dim**2))
-            history_indices = []
-            history_sampled = []
-            for b, n_queries_b in enumerate(n_queries):
-                if n_queries_b != 0:
-                    history_idx = torch.multinomial(torch.ones((self.num_glimpse_per_dim**2, )), n_queries_b, replacement=False)
-                    history_sampled.append(x_pos[b, history_idx, :])
-#                    print('history_sampled b', x_pos[b, history_idx, :].shape)
-                    history_indices_onehot[b, history_idx] = 1.
-                    history_indices.append(history_idx)
-                else:
-                    history_sampled.append(torch.zeros((1, x_pos.size(2), x_pos.size(3))))
-                    history_indices.append([])
-                attn_mask[b, :n_queries_b*4] = 1
-            attn_mask = torch.cat([torch.ones((B, 2)), attn_mask], dim=1).cuda() # append class and distill tokens
-            history_sampled = torch.nn.utils.rnn.pad_sequence(history_sampled, batch_first=True).cuda()
-            history_indices = torch.nn.utils.rnn.pad_sequence(history_indices, batch_first=True, padding_value=0.).cuda()
-            #print('max', n_queries.max())
-            #print('history_sampled padded', history_sampled.shape)
-            history_indices_onehot = history_indices_onehot.cuda()
-
-            # query from location module
-            query_loc = []
-            query_mask = torch.zeros((B, self.num_glimpse_per_dim**2)).cuda()
-            for i in range(history_indices_onehot):
-                query_loc.append(
-                    torch.arange(self.num_glimpse_per_dim**2)[(1 - history_indices_onehot[i]).bool()]
-                )
-                query_mask[i, :(1 - history_indices_onehot[i]).sum()]
-            query_loc = torch.nn.utils.rnn.pad_sequence(query_mask, batch_first=True, padding_value=0)
-            feat, feat_dist = self.extract_features_of_glimpses(history_sampled, attn_mask)
-            query_prob = self.forward_querier(feat, feat_dist, query_loc, query_mask)
+            # sample random history
+            n_queries = torch.randint(low=0, high=48, size=(1,)).item()
+            mask_indices = torch.multinomial(torch.ones((B, 49)), n_queries, replacement=False)
             
-            # append query answer to history
-            #print('query_prob', query_prob.shape, x_pos.shape)
-            query_prob = query_prob[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)
-            query_x = x_pos.gather(1, query_loc) 
-            query_vec = (query_x * query_prob).sum(dim=1, keepdim=True)
-            history_updated = torch.cat([history_sampled, query_vec], dim=1)
-            attn_mask_updated = torch.cat([attn_mask, torch.ones((B, 4)).cuda()], dim=1)
-            #print('history updated', history_updated.shape)
-            #print('attn_mask_updated', attn_mask_updated)
-            feat_updated, feat_dist_updated = self.extract_features_of_glimpses(history_updated, attn_mask_updated)
-
-            # forward classifier
-            logits = self.head(feat_updated)
-            logits_dist = self.head_dist(feat_dist_updated)
-
-            # compute distillation losses
+            # compute features based on random history
+            sampled_history = x_pos.gather(1, mask_indices[:,:,None,None].repeat(1,1,x_pos.size(2), x_pos.size(3)))
+            feat, feat_dist = self.extract_features_of_glimpses(sampled_history)
+            
+            # query
+            all_loc = torch.arange(49)[None,...].repeat(B, 1)
+            candidate_loc_mask = torch.ones_like(all_loc).scatter_(1, mask_indices, 0.).bool()
+            candidate_loc = all_loc[candidate_loc_mask].reshape(B, 49 - n_queries)
+            
+            loc_pos = torch.gather(self.loc_pos_embed.repeat(B, 1, 1), 1, candidate_loc[:,:,None].repeat(1,1,self.embed_dim))
+            feat_loc_pos = torch.cat([feat[:,None,:].repeat(1, candidate_loc.size(1), 1),
+                                      feat_dist[:,None,:].repeat(1, candidate_loc.size(1), 1),
+                                      loc_pos], -1)
+            query_logits = self.location_module(feat_loc_pos.flatten(0, 1)).reshape(feat_loc_pos.size()[:2])
+            query = self.softmax(query_logits / self.tau)
+            query = (hardargmax(query_logits) - query).detach() + query
+            
+            candidate_x = x_pos.gather(1, candidate_loc[:,:,None,None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))
+            query_x = (candidate_x * query[:, :, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3))).sum(1)
+            updated_history = torch.cat([sampled_history, query_x], dim=1)
+            
+            # inference with updated history
+            updated_feat, updated_feat_dist = self.extract_features_of_glimpses(updated_history)
+            logits = self.head(updated_feat)
+            logits_dist = self.head_dist(updated_feat_dist)
+            
+            # distillation loss
             dist_loss = self.dist_criterion(logits_dist, teacher_gt, teacher_dist)
             
-            # compute entropy loss
+            # CE loss
             if dist_loss==torch.zeros(1).mean():
                 prob_fusion = (torch.softmax(logits, dim=-1) + torch.softmax(logits_dist, dim=-1))/2
                 class_loss = -torch.log(prob_fusion[range(B),targets[range(B)]]).mean()
             else:
                 class_loss = self.classifier_criterion(logits, targets)
-            
+                
             actor_loss = torch.tensor(0.).cuda()
             critic_loss = torch.tensor(0.).cuda()
-
+           
             self.return_logits = logits.detach()
             return class_loss, actor_loss, critic_loss, dist_loss
 
@@ -478,41 +331,43 @@ class STAMVisionTransformer(VisionTransformer):
             x, pos = self.prepare_glimpses(x) 
             all_logits, all_logits_dist = [], []
 
+            all_loc = torch.arange(self.num_glimpse_per_dim**2)[None,...].repeat(B, 1).to(x.device)
+            all_loc_permuted = torch.argsort(torch.rand((B, self.num_glimpse_per_dim**2), device=x.device), dim=-1)
+
             x_pos = self.patch_embed(x.flatten(1,3)) + pos.flatten(1,3) # (B, 7*7*2*2, 3, 16, 16) -> (B, 7*7*2*2, C)
             x_pos = x_pos.view(B, self.num_glimpse_per_dim**2, self.num_patch_per_dim_glimpse**2, self.embed_dim)
 
-            history_idx = torch.zeros((B, self.num_glimpse_per_dim**2)).cuda()
+            mask_indices = torch.zeros((B, 49), requres_grad=False).cuda()
+            history_x = torch.zeros((B, 0, x_pos.size(2), x_pos.size(3)), requires_grad=False).cuda()
             for t in range(0, self.T, 1):
-                if t == 0:
-                    history = torch.zeros((B, 0, self.num_patch_per_dim_glimpse**2, self.embed_dim)).cuda()
-                    with torch.no_grad():
-                        feat, feat_dist = self.extract_features_of_glimpses(history)
-                        
-                query_loc = []
-                query_mask = torch.zeros((B, self.num_glimpse_per_dim**2)).cuda()
-                for i in range(history_indices_onehot):
-                    query_loc.append(
-                        torch.arange(self.num_glimpse_per_dim**2)[(1 - history_idx[i]).bool()]
-                    )
-                    query_mask[i, :(1 - history_idx[i]).sum()]
-                query_loc = torch.nn.utils.rnn.pad_sequence(query_mask, batch_first=True, padding_value=0)
-                with torch.no_grad():
-                    query_prob = self.forward_querier(feat, feat_dist, query_loc, query_mask)
+
+                if t==0:
+                    feat, feat_dist = self.extract_features_of_glimpses(None)
+                else:
+                    feat, feat_dist = self.extract_features_of_glimpses(history_x)
+                logits = self.head(feat)
+                logits_dist = self.head_dist(feat_dist)
                     
-                query_prob = query_prob[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)
-                query_x = x_pos.gather(1, query_loc) 
-                query_vec = (query_x * query_prob).sum(dim=1, keepdim=True)
-                history_updated = torch.cat([history_sampled, query_vec], dim=1)
-#                print('history_idx', t, history_idx[:10, :10])
-                history = x_pos * history_idx[:, :, None, None].repeat(1, 1, self.num_patch_per_dim_glimpse**2, self.embed_dim)
-                with torch.no_grad():
-                    feat, feat_dist = self.extract_features_of_glimpses(history, attn_mask)
-#                    print('history idx sum', history_idx.sum(-1))
-                    logits = self.head(feat)
-                    logits_dist = self.head_dist(feat_dist)
+                # query
+                loc_pos = self.loc_pos_embed.repeat(B, 1, 1)
+                feat_loc_pos = torch.cat([feat[:,None,:].repeat(1, 49, 1),
+                                        feat_dist[:,None,:].repeat(1, 49, 1),
+                                        loc_pos], -1)
+                query_logits = self.location_module(feat_loc_pos.flatten(0, 1)).reshape(feat_loc_pos.size()[:2])
+                query_logits = query_logits.masked_fill(mask_indices==1, float('-inf'))
+                query_indices = query_logits.argmax(1)
+                
+                # update mask
+                mask_indices[torch.arange(B), query_indices] = 1.
+                
+                # update history
+                history_x = torch.cat([history_x,
+                                       x_pos.gather(1, mask_indices[:, None, None, None].repeat(1, 1, x_pos.size(2), x_pos.size(3)))], dim=1)
+  
                 if ((t+1)%self.stepT)==0:
                     all_logits.append(logits)
                     all_logits_dist.append(logits_dist)
+
             all_logits = torch.stack(all_logits)
             all_logits_dist = torch.stack(all_logits_dist)
 
@@ -525,8 +380,8 @@ class STAMVisionTransformer(VisionTransformer):
                     )
             else:
                 class_loss_dist = self.dist_criterion(all_logits_dist.flatten(0,1),None,None)
-            return all_logits, class_loss, all_logits_dist, class_loss_dist
 
+            return all_logits, class_loss, all_logits_dist, class_loss_dist
 
 
     def recon_glimpse(self, x, loc):
@@ -556,4 +411,3 @@ class STAMVisionTransformer(VisionTransformer):
 
 
 
-# 
